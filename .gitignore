@@ -1,0 +1,20 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temp
+*.log
+tmp/
+temp/
+
+# Large data files (if any accidentally added)
+*.csv
+*.xlsx
+*.parquet
+*.h5
