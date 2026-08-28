@@ -1,0 +1,26 @@
+# Local runtimes and generated state
+var/
+repos/
+.pytest_cache/
+.ruff_cache/
+.codegraph/
+.omo/
+
+# Python cache and local tooling
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated reports and screenshots
+*.log
+*.tmp
+docs/by-requirement/26.06趋势票/
+docs/by-requirement/全A股趋势分析/

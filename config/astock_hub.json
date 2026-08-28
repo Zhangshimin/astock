@@ -1,0 +1,38 @@
+{
+  "name": "个人 A 股投研中枢",
+  "version": "0.1.0",
+  "objective": "稳定数据、论坛情绪、个股深研、选股回测和持仓盯盘的一体化个人工作台",
+  "safety": {
+    "live_trading_enabled": false,
+    "forum_crawling_requires_manual_login": true,
+    "store_cookies_outside_reports": true
+  },
+  "routes": {
+    "market_data": ["akshare", "adata", "OpenAshare", "easy_tdx"],
+    "forum_data": ["EastMoney_Crawler", "xueqiu-crawler", "xueqiu_spider_LQH_LZQ"],
+    "deep_research": ["UZI-Skill", "TradingAgents-astock"],
+    "screening": ["tickflow-stock-panel", "stock-scanner"],
+    "backtesting": ["qlib", "rqalpha", "hikyuu", "QUANTAXIS"],
+    "monitoring": ["PanWatch"],
+    "execution_disabled": ["vnpy"]
+  },
+  "projects": [
+    {"id": "akshare", "path": "repos/akshare", "role": "market-data", "license": "MIT", "integration": "python-api"},
+    {"id": "adata", "path": "repos/adata", "role": "market-data", "license": "unknown", "integration": "python-api"},
+    {"id": "OpenAshare", "path": "repos/OpenAshare", "role": "market-data", "license": "unknown", "integration": "python-api"},
+    {"id": "easy_tdx", "path": "repos/easy_tdx", "role": "realtime-data", "license": "custom", "integration": "python-api"},
+    {"id": "EastMoney_Crawler", "path": "repos/EastMoney_Crawler", "role": "forum-data", "license": "MIT", "integration": "file-adapter"},
+    {"id": "xueqiu-crawler", "path": "repos/xueqiu-crawler", "role": "forum-data", "license": "research-only", "integration": "jsonl-adapter"},
+    {"id": "xueqiu_spider_LQH_LZQ", "path": "repos/xueqiu_spider_LQH_LZQ", "role": "forum-reference", "license": "no-license", "integration": "reference-only"},
+    {"id": "UZI-Skill", "path": "repos/UZI-Skill", "role": "deep-research", "license": "MIT", "integration": "subprocess"},
+    {"id": "TradingAgents-astock", "path": "repos/TradingAgents-astock", "role": "deep-research", "license": "unknown", "integration": "subprocess"},
+    {"id": "tickflow-stock-panel", "path": "repos/tickflow-stock-panel", "role": "screening", "license": "MIT", "integration": "service"},
+    {"id": "stock-scanner", "path": "repos/stock-scanner", "role": "screening", "license": "unknown", "integration": "subprocess"},
+    {"id": "qlib", "path": "repos/qlib", "role": "backtesting", "license": "MIT", "integration": "isolated-env"},
+    {"id": "rqalpha", "path": "repos/rqalpha", "role": "backtesting", "license": "custom", "integration": "isolated-env"},
+    {"id": "hikyuu", "path": "repos/hikyuu", "role": "backtesting", "license": "Apache-2.0", "integration": "isolated-env"},
+    {"id": "QUANTAXIS", "path": "repos/QUANTAXIS", "role": "backtesting", "license": "MIT", "integration": "isolated-env"},
+    {"id": "PanWatch", "path": "repos/PanWatch", "role": "monitoring", "license": "MIT", "integration": "service"},
+    {"id": "vnpy", "path": "repos/vnpy", "role": "execution", "license": "MIT", "integration": "disabled"}
+  ]
+}
