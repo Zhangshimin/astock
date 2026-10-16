@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from astock_hub.intraday import (
     CHINA_TZ,
+    GlobalMarketContext,
     IntradayContext,
     MinuteBar,
     StockBoard,
@@ -31,6 +32,12 @@ def bar(minute: int, close: float) -> MinuteBar:
 
 
 class IntradayMacdTest(unittest.TestCase):
+    def test_global_context_turns_reference_assets_into_regime(self) -> None:
+        strong = GlobalMarketContext(sp500=0.01, nasdaq=0.012, semis=0.015, bank=0.008)
+        weak = GlobalMarketContext(sp500=-0.01, nasdaq=-0.012, semis=-0.015, vix=0.10, bank=-0.008)
+        self.assertEqual(strong.label, "偏强")
+        self.assertEqual(weak.label, "偏弱")
+
     def test_parses_upcoming_equity_event_and_describes_impact(self) -> None:
         payload = {
             "result": {

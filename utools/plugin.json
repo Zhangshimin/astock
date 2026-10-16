@@ -1,0 +1,71 @@
+{
+  "main": "index.html",
+  "preload": "preload.js",
+  "logo": "logo.png",
+  "name": "悄盯一股",
+  "version": "0.3.0",
+  "description": "专注一只股票，悄悄融入任务栏。变色龙底色随背景适配，支持拖拽、分时行情、MACD、五档盘口与可选声音提醒，小巧低调，随时看一眼。",
+  "platform": [
+    "win32"
+  ],
+  "features": [
+    {
+      "code": "home",
+      "explain": "悄盯一股 · 专注一股，低调融入任务栏",
+      "cmds": [
+        "悄盯一股",
+        "astock",
+        "stock",
+        "股票",
+        {
+          "type": "regex",
+          "label": "悄盯一股",
+          "match": "/^(?:(?:sh|sz|bj))?\\d{6}(?:\\.(?:SH|SZ|BJ))?$/i",
+          "minLength": 6
+        }
+      ]
+    },
+    {
+      "code": "bar",
+      "explain": "任务栏盯盘 · 行情条、五档盘口与信号提醒",
+      "cmds": [
+        "盯盘",
+        "任务栏股票",
+        "行情条",
+        "隐蔽盯盘",
+        {
+          "type": "regex",
+          "label": "启动行情条",
+          "match": "/^盯盘\\s+\\d{6}$/",
+          "minLength": 9
+        }
+      ]
+    },
+    {
+      "code": "gui",
+      "explain": "分时图表 · 价格、成交量与 MACD",
+      "cmds": [
+        "股票图表",
+        "分时图",
+        "MACD",
+        {
+          "type": "regex",
+          "label": "启动股票图表",
+          "match": "/^图表\\s+\\d{6}$/",
+          "minLength": 9
+        }
+      ]
+    },
+    {
+      "code": "settings",
+      "explain": "盯盘设置 · 位置、拖拽、变色龙与提醒",
+      "cmds": [
+        "悄盯一股设置",
+        "股票设置",
+        "盯盘设置",
+        "行情条设置",
+        "变色龙设置"
+      ]
+    }
+  ]
+}

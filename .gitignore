@@ -1,5 +1,8 @@
 # Local runtimes and generated state
 var/
+dist/
+utools/runtime/
+utools/runtime-manifest.json
 repos/
 .pytest_cache/
 .ruff_cache/

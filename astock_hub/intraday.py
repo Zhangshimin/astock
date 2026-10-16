@@ -21,6 +21,7 @@ SINA_MINUTE_URL = (
     "CN_MarketDataService.getKLineData"
 )
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,9 @@ class IntradayContext:
     sector_name: str
     sector_change: float
     sector_momentum: float
+    sector_relative_strength: float = 0.0
+    sector_volume_ratio: float = 1.0
+    sector_sentiment_score: int = 50
 
     @property
     def reverse_sell_strength(self) -> str:
@@ -119,6 +123,81 @@ class IntradayContext:
             value <= 0 for value in (self.market_momentum, self.sector_momentum)
         )
         return ("弱", "中", "强")[weak_count]
+
+
+@dataclass(frozen=True)
+class GlobalMarketContext:
+    """隔夜与宏观参考，供开盘前/日内决策使用。百分比为小数。"""
+
+    sp500: float = 0.0
+    nasdaq: float = 0.0
+    semis: float = 0.0
+    vix: float = 0.0
+    brent: float = 0.0
+    bank: float = 0.0
+    asof: datetime | None = None
+
+    @property
+    def risk_score(self) -> float:
+        # VIX 上涨代表风险上升，因此反向计分。
+        return self.sp500 * 0.30 + self.nasdaq * 0.22 + self.semis * 0.18 - self.vix * 0.15 + self.bank * 0.10 + self.brent * 0.05
+
+    @property
+    def label(self) -> str:
+        if self.risk_score >= 0.004:
+            return "偏强"
+        if self.risk_score <= -0.004:
+            return "偏弱"
+        return "震荡"
+
+
+def _fetch_yahoo_change(symbol: str, timeout: float = 5) -> tuple[float, datetime | None]:
+    """Fetch latest completed daily change from Yahoo chart API."""
+    request = Request(
+        YAHOO_CHART_URL.format(symbol) + "?range=5d&interval=1d",
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = json.load(response)
+    result = ((payload.get("chart") or {}).get("result") or [None])[0] or {}
+    closes = (((result.get("indicators") or {}).get("quote") or [{}])[0].get("close") or [])
+    closes = [float(value) for value in closes if value is not None]
+    if len(closes) < 2 or closes[-2] == 0:
+        raise RuntimeError(f"Yahoo {symbol} 日线数据不足")
+    timestamps = result.get("timestamp") or []
+    asof = datetime.fromtimestamp(timestamps[-1], tz=CHINA_TZ) if timestamps else None
+    return closes[-1] / closes[-2] - 1, asof
+
+
+def fetch_global_market_context(timeout: float = 5) -> GlobalMarketContext:
+    """Read daily reference assets; individual outages degrade to zero."""
+    symbols = {"sp500": "^GSPC", "nasdaq": "^IXIC", "semis": "SOXX", "vix": "^VIX", "brent": "BZ=F", "bank": "KBE"}
+    values: dict[str, float] = {}
+    asof: datetime | None = None
+    for key, symbol in symbols.items():
+        try:
+            values[key], stamp = _fetch_yahoo_change(symbol, timeout)
+            asof = asof or stamp
+        except (OSError, ValueError, RuntimeError, TypeError):
+            # Tencent has a useful no-key quote feed for the same references;
+            # it also works during the A-share session when Yahoo is blocked.
+            try:
+                quote_symbols = {"sp500": "usINX", "nasdaq": "usIXIC", "semis": "usSOXX", "vix": "usVIX", "brent": "usCL", "bank": "usKBE"}
+                request = Request(TENCENT_QUOTE_URL + quote_symbols[key], headers={"User-Agent": "Mozilla/5.0"})
+                with urlopen(request, timeout=timeout) as response:
+                    raw = response.read().decode("gbk", errors="ignore")
+                match = re.search(r'=\"([^\"]+)\"', raw)
+                fields = match.group(1).split("~") if match else []
+                current, previous = float(fields[3]), float(fields[4])
+                values[key] = current / previous - 1 if previous else 0.0
+                if len(fields) > 30:
+                    try:
+                        asof = asof or datetime.strptime(fields[30], "%Y-%m-%d %H:%M:%S").replace(tzinfo=CHINA_TZ)
+                    except ValueError:
+                        pass
+            except (OSError, ValueError, IndexError, TypeError):
+                values[key] = 0.0
+    return GlobalMarketContext(asof=asof, **values)
 
 
 @dataclass(frozen=True)
@@ -537,6 +616,29 @@ def _context_values(bars: list[MinuteBar]) -> tuple[float, float]:
     return bars[-1].close / opening - 1, bars[-1].close / recent - 1
 
 
+def _volume_ratio(bars: list[MinuteBar]) -> float:
+    """Return latest minute volume relative to the preceding five-minute mean."""
+    if len(bars) < 2:
+        return 1.0
+    baseline = [max(bar.volume, 0) for bar in bars[-6:-1]]
+    average = sum(baseline) / len(baseline) if baseline else 0.0
+    if average <= 0:
+        return 1.0
+    return max(bars[-1].volume, 0) / average
+
+
+def _sector_sentiment_score(
+    sector_momentum: float, relative_strength: float, volume_ratio: float
+) -> int:
+    """Combine short-term trend, market-relative strength and volume expansion."""
+    momentum_points = max(-25.0, min(25.0, sector_momentum * 1000))
+    relative_points = max(-15.0, min(15.0, relative_strength * 800))
+    volume_points = max(-10.0, min(10.0, (volume_ratio - 1.0) * 10))
+    return round(
+        max(0.0, min(100.0, 50.0 + momentum_points + relative_points + volume_points))
+    )
+
+
 def fetch_intraday_context(
     code: str,
     timeout: float = 8,
@@ -556,6 +658,8 @@ def fetch_intraday_context(
     except (OSError, RuntimeError, ValueError):
         pass
     sector_change, sector_momentum = _context_values(sector_bars)
+    relative_strength = sector_change - market_change
+    volume_ratio = _volume_ratio(sector_bars)
     return IntradayContext(
         market_name=market_name,
         market_change=market_change,
@@ -563,6 +667,11 @@ def fetch_intraday_context(
         sector_name=fetched_sector_name or selected_sector.name,
         sector_change=sector_change,
         sector_momentum=sector_momentum,
+        sector_relative_strength=relative_strength,
+        sector_volume_ratio=volume_ratio,
+        sector_sentiment_score=_sector_sentiment_score(
+            sector_momentum, relative_strength, volume_ratio
+        ),
     )
 
 

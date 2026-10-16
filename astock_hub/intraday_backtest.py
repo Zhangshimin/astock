@@ -275,6 +275,7 @@ def run_backtest(
     forward_bars: int = 15,
     cost_rate: float = 0.001,
     position_fraction: float = 0.1,
+    config: IntradayStrategyConfig | None = None,
 ) -> BacktestResult:
     if not 0 < position_fraction <= 1:
         raise ValueError("单次仓位比例必须大于 0 且不超过 1")
@@ -288,7 +289,7 @@ def run_backtest(
         # 默认柱缩策略的回测必须与实时提醒共用价格保护，否则回测结果会把
         # 实盘不会提示的低位卖出、微小价差也统计成有效交易。
         sides = (
-            guarded_reverse_t_action_sides(session_bars, points, raw_sides)
+            guarded_reverse_t_action_sides(session_bars, points, raw_sides, config=config)
             if mode == "histogram"
             else reverse_t_action_sides(raw_sides)
         )

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>悄盯一股 · AStock</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand"><img src="logo.png" alt="" width="40" height="40"><div><h1>悄盯一股 <span>AStock</span></h1><p>专注一只股票，悄悄融入任务栏</p></div></div>
+      <button id="settings-toggle" class="quiet" aria-expanded="false" aria-controls="settings">设置</button>
+    </header>
+
+    <section id="workbench" class="stock-card" aria-labelledby="stock-title">
+      <div class="eyebrow">A 股 · 盘中盯盘</div>
+      <h2 id="stock-title">从一只股票开始</h2>
+      <form id="launch-form">
+        <label for="stock-code">股票代码</label>
+        <div class="code-row"><input id="stock-code" name="code" placeholder="002837" maxlength="12" autocomplete="off" spellcheck="false" required><span>沪 / 深 / 北</span></div>
+        <div class="actions">
+          <button type="submit" id="launch-bar" class="primary" data-action>打开行情条 <span>↗</span></button>
+          <button type="button" id="launch-gui" data-action>打开分时图表</button>
+          <button type="button" id="show-now" data-action>立即显示行情条</button>
+        </div>
+      </form>
+      <p class="hint">行情条显示分时、成交量、MACD 与五档盘口。窗口独立运行，退出插件后仍可继续盯盘。</p>
+    </section>
+
+    <nav id="workbench-tools" class="tools" aria-label="工作台工具">
+      <button id="reports" data-action><strong>用户数据</strong><small>设置、记录与日志</small></button>
+      <button id="runtime" data-action><strong>运行状态</strong><small>检查内置组件</small></button>
+    </nav>
+
+    <section id="settings" hidden aria-labelledby="settings-title">
+      <h2 id="settings-title">常用设置</h2>
+      <form id="settings-form">
+        <div class="settings-row"><div><label for="default-code">默认股票</label><input id="default-code" maxlength="12" required></div><div><label for="poll">刷新间隔（秒）</label><input id="poll" type="number" min="3" max="3600" required></div></div>
+        <div id="common-settings" class="settings-row"></div>
+        <details id="sound-options" class="settings-fold">
+          <summary>声音提醒 <span>提示音、语音与触发条件</span></summary>
+          <p class="hint">总开关关闭后保持静音，视觉提醒仍保留。仅勾选的信号会发声；买卖声音须同时满足方向与观察条件。图表金叉/死叉属于观察信号。</p>
+          <div id="sound-settings"></div>
+        </details>
+        <details id="advanced-options" class="settings-fold">
+          <summary>高级设置 <span>时段、提醒细节、策略与行情</span></summary>
+          <div id="advanced-settings"></div>
+        </details>
+        <details class="settings-fold">
+          <summary>诊断与日志</summary>
+          <button type="button" id="logs" class="quiet" data-action>打开启动日志</button>
+        </details>
+        <div class="actions save-actions"><button type="submit" class="primary" data-action>保存设置</button><span class="hint">保存后自动应用到行情条</span></div>
+      </form>
+    </section>
+
+    <section id="status-box" hidden><div id="status" role="status" aria-live="polite"></div><pre id="details" hidden></pre></section>
+    <footer><span>仅供研究与观察 · 不自动下单</span><span>Windows x64 · v0.3.0</span></footer>
+  </main>
+</body>
+</html>

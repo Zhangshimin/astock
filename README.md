@@ -1,8 +1,16 @@
-# astock
+# 悄盯一股 · AStock
 
-个人 A 股投研与 Windows 盘中盯盘工具。
+专注一只股票，悄悄融入任务栏。变色龙底色随背景适配，支持拖拽、分时行情、MACD、五档盘口与可选声音提醒，小巧低调，随时看一眼。
 
-## 快速开始
+## uTools 插件
+
+Windows x64 独立版自带运行组件，安装后输入 `悄盯一股` / `astock` / `stock` 即可使用，
+无需 Python、项目源码或目录配置。也可输入 `盯盘 002837` / `图表 002837` 启动窗口。
+开发者通过 `tools/build_utools.py` 生成完整发布目录，再在 uTools 开发者工具中打包发布。
+
+安装、配置和分发说明：[utools/README.md](utools/README.md)。
+
+## 源码开发运行（插件安装者无需执行）
 
 ```powershell
 python -m pip install pystray pillow pandas

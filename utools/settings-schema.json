@@ -1,0 +1,362 @@
+[
+  {
+    "key": "dragEnabled",
+    "group": "显示与窗口",
+    "label": "允许拖拽行情条（双击图表恢复自动挂靠）",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "chameleon",
+    "group": "显示与窗口",
+    "label": "变色龙模式（跟随周围背景主色）",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "displayMode",
+    "group": "显示与窗口",
+    "label": "行情条显示时段",
+    "type": "select",
+    "default": "always",
+    "options": {
+      "always": "全天显示（推荐）",
+      "scheduled": "仅在指定时段显示"
+    }
+  },
+  {
+    "key": "displayStart",
+    "group": "显示与窗口",
+    "label": "显示开始时间",
+    "type": "time",
+    "default": "09:00"
+  },
+  {
+    "key": "displayEnd",
+    "group": "显示与窗口",
+    "label": "显示结束时间",
+    "type": "time",
+    "default": "15:30"
+  },
+  {
+    "key": "weekdaysOnly",
+    "group": "显示与窗口",
+    "label": "仅工作日显示（不识别交易所节假日）",
+    "type": "boolean",
+    "default": false
+  },
+  {
+    "key": "dockMode",
+    "group": "显示与窗口",
+    "label": "行情条位置",
+    "type": "select",
+    "default": "taskbar",
+    "options": {
+      "taskbar": "任务栏内部（默认）",
+      "above": "任务栏上方",
+      "floating": "自由位置"
+    }
+  },
+  {
+    "key": "topmost",
+    "group": "显示与窗口",
+    "label": "窗口置顶",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "windowX",
+    "group": "显示与窗口",
+    "label": "自由位置 X（像素）",
+    "type": "integer",
+    "default": 100,
+    "min": -20000,
+    "max": 20000
+  },
+  {
+    "key": "windowY",
+    "group": "显示与窗口",
+    "label": "自由位置 Y（像素）",
+    "type": "integer",
+    "default": 100,
+    "min": -20000,
+    "max": 20000
+  },
+  {
+    "key": "orderBook",
+    "group": "显示与窗口",
+    "label": "打开五档盘口详情窗口",
+    "type": "boolean",
+    "default": false
+  },
+  {
+    "key": "notifications",
+    "group": "信号与提醒",
+    "label": "启用信号提醒（图表弹窗 / 行情条高亮）",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "alertStart",
+    "group": "声音提醒",
+    "label": "提醒开始时间（声音与视觉）",
+    "type": "time",
+    "default": "09:00"
+  },
+  {
+    "key": "alertEnd",
+    "group": "声音提醒",
+    "label": "提醒结束时间（声音与视觉）",
+    "type": "time",
+    "default": "15:30"
+  },
+  {
+    "key": "sound",
+    "group": "声音提醒",
+    "label": "播放提示音",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "speech",
+    "group": "声音提醒",
+    "label": "播报买卖信号",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "volumeSpeech",
+    "group": "声音提醒",
+    "label": "播报价量变化",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "flash",
+    "group": "信号与提醒",
+    "label": "窗口 / 行情条闪烁",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "alertSeconds",
+    "group": "信号与提醒",
+    "label": "行情条高亮时长（秒）",
+    "type": "integer",
+    "default": 30,
+    "min": 1,
+    "max": 600
+  },
+  {
+    "key": "candidateMode",
+    "group": "反 T 策略",
+    "label": "候选公式",
+    "type": "select",
+    "default": "histogram",
+    "options": {
+      "histogram": "柱缩反 T（连续缩短 3 次）",
+      "sensitive": "灵敏（单根交叉）",
+      "balanced": "平衡（双根 + VWAP）",
+      "steady": "稳健（三根 + VWAP/EMA）"
+    }
+  },
+  {
+    "key": "sellVwapPremium",
+    "group": "反 T 策略",
+    "label": "卖出高于 VWAP（%）",
+    "type": "number",
+    "default": 0.5,
+    "min": 0,
+    "max": 30,
+    "step": 0.1
+  },
+  {
+    "key": "buybackDiscount",
+    "group": "反 T 策略",
+    "label": "买回价差（%）",
+    "type": "number",
+    "default": 0.8,
+    "min": 0,
+    "max": 30,
+    "step": 0.1
+  },
+  {
+    "key": "chaseBackRise",
+    "group": "反 T 策略",
+    "label": "卖飞保护涨幅（%）",
+    "type": "number",
+    "default": 0.6,
+    "min": 0,
+    "max": 30,
+    "step": 0.1
+  },
+  {
+    "key": "cooldownMinutes",
+    "group": "反 T 策略",
+    "label": "完成一轮后的冷却（分钟）",
+    "type": "integer",
+    "default": 20,
+    "min": 0,
+    "max": 240
+  },
+  {
+    "key": "maxCycles",
+    "group": "反 T 策略",
+    "label": "每日最多轮次",
+    "type": "integer",
+    "default": 2,
+    "min": 1,
+    "max": 20
+  },
+  {
+    "key": "sellStart",
+    "group": "反 T 策略",
+    "label": "允许卖出开始时间",
+    "type": "time",
+    "default": "09:45"
+  },
+  {
+    "key": "sellCutoff",
+    "group": "反 T 策略",
+    "label": "停止开新卖出时间",
+    "type": "time",
+    "default": "14:20"
+  },
+  {
+    "key": "sectorCode",
+    "group": "行情与回测",
+    "label": "对照板块代码（空白自动选择，如 BKxxxx）",
+    "type": "text",
+    "default": ""
+  },
+  {
+    "key": "quoteTimeout",
+    "group": "行情与回测",
+    "label": "行情请求超时（秒）",
+    "type": "integer",
+    "default": 3,
+    "min": 1,
+    "max": 60
+  },
+  {
+    "key": "contextTimeout",
+    "group": "行情与回测",
+    "label": "板块 / 股权请求超时（秒）",
+    "type": "integer",
+    "default": 5,
+    "min": 1,
+    "max": 60
+  },
+  {
+    "key": "contextRefresh",
+    "group": "行情与回测",
+    "label": "大盘与板块刷新（秒）",
+    "type": "integer",
+    "default": 60,
+    "min": 5,
+    "max": 3600
+  },
+  {
+    "key": "equityRefresh",
+    "group": "行情与回测",
+    "label": "股权事件刷新（秒）",
+    "type": "integer",
+    "default": 3600,
+    "min": 60,
+    "max": 86400
+  },
+  {
+    "key": "historyBars",
+    "group": "行情与回测",
+    "label": "回测分钟数量（新浪最多 1023）",
+    "type": "integer",
+    "default": 1023,
+    "min": 60,
+    "max": 1023
+  },
+  {
+    "key": "volumeSurge",
+    "group": "行情与回测",
+    "label": "放量倍数阈值",
+    "type": "number",
+    "default": 1.3,
+    "min": 1,
+    "max": 10,
+    "step": 0.1
+  },
+  {
+    "key": "volumeShrink",
+    "group": "行情与回测",
+    "label": "缩量倍数阈值",
+    "type": "number",
+    "default": 0.7,
+    "min": 0.1,
+    "max": 1,
+    "step": 0.1
+  },
+  {
+    "key": "audioEnabled",
+    "group": "声音提醒",
+    "label": "声音提醒总开关",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioBuy",
+    "group": "声音提醒",
+    "label": "买入 / 买回信号发声",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioSell",
+    "group": "声音提醒",
+    "label": "卖出信号发声",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioObservation",
+    "group": "声音提醒",
+    "label": "未达到策略门槛的观察信号也发声",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioVolumeConfirm",
+    "group": "声音提醒",
+    "label": "上涨放量确认时播报",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioVolumeWeak",
+    "group": "声音提醒",
+    "label": "上涨缩量乏力时播报",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioVolumeSellPressure",
+    "group": "声音提醒",
+    "label": "下跌放量时播报",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioVolumeDivergence",
+    "group": "声音提醒",
+    "label": "价量背离时播报",
+    "type": "boolean",
+    "default": true
+  },
+  {
+    "key": "audioCooldown",
+    "group": "声音提醒",
+    "label": "两次发声最小间隔（秒，0 表示不限制）",
+    "type": "integer",
+    "default": 30,
+    "min": 0,
+    "max": 3600
+  }
+]

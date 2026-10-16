@@ -10,6 +10,7 @@ import threading
 import time
 import tkinter as tk
 import winsound
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from datetime import time as datetime_time
 from pathlib import Path
@@ -26,6 +27,7 @@ if str(ROOT) not in sys.path:
 from astock_hub.intraday import (
     CHINA_TZ,
     EquityEvent,
+    GlobalMarketContext,
     IntradayContext,
     MacdPoint,
     MacdSignal,
@@ -36,6 +38,7 @@ from astock_hub.intraday import (
     completed_bars,
     default_stock_board,
     fetch_equity_event,
+    fetch_global_market_context,
     fetch_intraday_context,
     fetch_minute_bars,
     fetch_order_book,
@@ -60,6 +63,12 @@ from astock_hub.intraday_backtest import (
     session_vwap_values,
 )
 from astock_hub.intraday_journal import TradeJournal
+from astock_hub.desktop_settings import read_settings, display_allowed, strategy_config, write_status
+from astock_hub.taskbar_position import calculate_taskbar_position
+from astock_hub.chameleon import background_color, foreground_color
+from astock_hub.audio_alerts import AudioGate
+from astock_hub.desktop_paths import user_data_dir
+import json
 
 DashboardDataMessage = tuple[
     Literal["data"], str, list[MinuteBar], list[MacdPoint], MacdSignal | None
@@ -75,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("code", nargs="?", help="6 位股票代码，例如 600519")
     parser.add_argument("--poll", type=int, default=5, help="轮询间隔秒数，默认 5")
     parser.add_argument("--once", action="store_true", help="只检查一次后退出")
+    parser.add_argument("--settings", type=Path, help="uTools 运行配置 JSON（自动热更新）")
     parser.add_argument(
         "--no-popup", action="store_true", help="只打印信号，不显示弹窗"
     )
@@ -97,6 +107,40 @@ def show_popup(title: str, message: str, warning: bool = False) -> None:
         return
     icon = 0x30 if warning else 0x40
     ctypes.windll.user32.MessageBoxW(None, message, title, icon | 0x00040000)
+
+
+def _speak_text(text: str) -> None:
+    """后台语音播报。播报文本经 stdin 传入而非命令行拼接，杜绝 PowerShell 注入面。"""
+    if sys.platform != "win32":
+        return
+    shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if shell is None:
+        return
+    script = (
+        "Add-Type -AssemblyName System.Speech; "
+        "[Console]::InputEncoding = [Text.Encoding]::UTF8; "
+        "$text = [Console]::In.ReadToEnd(); "
+        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+        "$s.Speak($text); $s.Dispose()"
+    )
+    try:
+        process = subprocess.Popen(
+            [shell, "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        return
+    try:
+        process.communicate(input=text.encode("utf-8"), timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        process.kill()
+        try:
+            process.communicate(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def notify(name: str, code: str, signal: MacdSignal, popup: bool) -> None:
@@ -140,10 +184,87 @@ class FlashWindowInfo(ctypes.Structure):
     ]
 
 
-class MacdDashboard:
+class DesktopSettingsMixin:
+    """Apply uTools settings on the Tk thread and acknowledge visible windows."""
+
+    def _alerts_allowed(self, now: datetime) -> bool:
+        settings = self.desktop_settings
+        return settings["notifications"] and display_allowed({
+            **settings, "displayMode": "scheduled",
+            "displayStart": settings["alertStart"], "displayEnd": settings["alertEnd"],
+        }, now)
+
+    def _init_settings(self, config_path: Path | None, poll_seconds: int) -> None:
+        self.audio_gate = AudioGate()
+        self.config_path = config_path
+        self.desktop_settings = read_settings(config_path)
+        if config_path is None:
+            self.desktop_settings["poll"] = poll_seconds
+        self._settings_text = None
+
+    def _allow_audio(self, event: str, guarded: bool = True) -> bool:
+        return self._alerts_allowed(datetime.now(CHINA_TZ)) and self.audio_gate.allow(
+            self.desktop_settings, event, guarded, time.monotonic()
+        )
+
+    def _start_settings_watch(self) -> None:
+        self._reload_settings()
+        self.root.after(1000, self._watch_settings)
+
+    def _watch_settings(self) -> None:
+        try:
+            self._reload_settings()
+        except (OSError, ValueError, tk.TclError) as exc:
+            print(f"配置更新失败：{exc}", file=sys.stderr, flush=True)
+        if self.root.winfo_exists():
+            self.root.after(1000, self._watch_settings)
+
+    def _reload_settings(self) -> None:
+        text = self.config_path.read_text(encoding="utf-8") if self.config_path else ""
+        if text != self._settings_text:
+            settings = read_settings(self.config_path) if self.config_path else self.desktop_settings
+            old = self.desktop_settings
+            self.desktop_settings = settings
+            self.poll_seconds = settings["poll"]
+            self.root.attributes("-topmost", settings["topmost"])
+            if hasattr(self, "candidate_mode"):
+                self.candidate_mode = settings["candidateMode"]
+                self.candidate_mode_var.set(self.candidate_mode)
+                self.strategy_config = strategy_config(settings)
+                if settings.get("symbol") and settings["symbol"] != self.code:
+                    self.code_var.set(settings["symbol"])
+                    self._change_code()
+                if old.get("sectorCode") != settings["sectorCode"]:
+                    self.selected_board = None
+                    self.context_updated = 0
+                    self.context_snapshot = None
+                if self.order_book_enabled != settings["orderBook"]:
+                    self.order_book_var.set(settings["orderBook"])
+                    self._toggle_order_book()
+                self.refresh_event.set()
+                if display_allowed(settings, datetime.now(CHINA_TZ)):
+                    self._dock_inside_taskbar()
+                else:
+                    self.root.withdraw()
+            else:
+                self.show_notifications = settings["notifications"]
+            self._settings_text = text
+        self.root.update_idletasks()
+        write_status(self.config_path, {
+            "requestId": self.desktop_settings.get("requestId"), "ready": True,
+            "visible": bool(self.root.winfo_viewable()), "symbol": self.code,
+            "displayMode": self.desktop_settings["displayMode"],
+        })
+
+
+class MacdDashboard(DesktopSettingsMixin):
     def __init__(
-        self, code: str | None, poll_seconds: int, show_notifications: bool
+        self, code: str | None, poll_seconds: int, show_notifications: bool,
+        config_path: Path | None = None,
     ) -> None:
+        self._init_settings(config_path, poll_seconds)
+        if config_path is None:
+            self.desktop_settings["notifications"] = show_notifications
         if sys.platform == "win32":
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
                 "astock.macd.dashboard"
@@ -165,6 +286,7 @@ class MacdDashboard:
         self.points: list[MacdPoint] = []
         self.name = self.code
         self._build_window()
+        self._start_settings_watch()
 
     def _build_window(self) -> None:
         self.root.title(f"AStock MACD - {self.code}")
@@ -239,7 +361,7 @@ class MacdDashboard:
     def _worker(self) -> None:
         while not self.stop_event.is_set():
             try:
-                name, bars = fetch_minute_bars(self.code)
+                name, bars = fetch_minute_bars(self.code, timeout=self.desktop_settings["quoteTimeout"])
                 closed = completed_bars(bars)
                 points = calculate_macd(closed)
                 if not points:
@@ -258,7 +380,7 @@ class MacdDashboard:
                 self.messages.put(("error", str(exc)))
             self.stop_event.wait(self.poll_seconds)
 
-    def _consume_messages(self) -> None:
+    def _consume_messages_once(self) -> None:
         try:
             while True:
                 message = self.messages.get_nowait()
@@ -296,13 +418,24 @@ class MacdDashboard:
                     is_new_bar
                     and signal is not None
                     and signal.time.date() == datetime.now(CHINA_TZ).date()
+                    and self._alerts_allowed(datetime.now(CHINA_TZ))
                 ):
                     self._signal_alert(signal)
                 self.last_processed = latest.time
         except queue.Empty:
             pass
-        if self.root.winfo_exists():
-            self.root.after(200, self._consume_messages)
+
+    def _consume_messages(self) -> None:
+        """薄包装：渲染异常只跳过本轮，绝不打断 200ms 重调度。"""
+        try:
+            self._consume_messages_once()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 看板渲染异常，已跳过本轮：{exc}", file=sys.stderr)
+        try:
+            if self.root.winfo_exists():
+                self.root.after(200, self._consume_messages)
+        except tk.TclError:
+            pass
 
     def _draw_charts(self) -> None:
         if not self.points:
@@ -469,6 +602,11 @@ class MacdDashboard:
         )
         if not self.show_notifications:
             return
+        if self._allow_audio(signal.side, guarded=False):
+            if self.desktop_settings["sound"]:
+                threading.Thread(target=MacdTaskbarBar._play_alert_sound, args=(signal.side,), daemon=True).start()
+            if self.desktop_settings["speech"]:
+                threading.Thread(target=_speak_text, args=(f"{action}，价格 {signal.price:.2f}",), daemon=True).start()
         self._flash_taskbar()
         toast = tk.Toplevel(self.root)
         toast.overrideredirect(True)
@@ -502,6 +640,8 @@ class MacdDashboard:
         toast.after(6000, toast.destroy)
 
     def _flash_taskbar(self) -> None:
+        if not self.desktop_settings["flash"]:
+            return
         if sys.platform != "win32":
             return
         info = FlashWindowInfo(
@@ -510,9 +650,9 @@ class MacdDashboard:
         ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
 
 
-def run_gui(code: str | None, poll_seconds: int, show_notifications: bool) -> int:
+def run_gui(code: str | None, poll_seconds: int, show_notifications: bool, config_path: Path | None = None) -> int:
     try:
-        return MacdDashboard(code, poll_seconds, show_notifications).run()
+        return MacdDashboard(code, poll_seconds, show_notifications, config_path).run()
     except ValueError as exc:
         print(f"参数错误：{exc}", file=sys.stderr)
         return 2
@@ -857,21 +997,48 @@ class WindowRect(ctypes.Structure):
     ]
 
 
-class MacdTaskbarBar:
+# 价量状态判定阈值：最新成交量相对前 5 根分钟均量的倍数。
+VOLUME_SURGE_RATIO = 1.3
+VOLUME_SHRINK_RATIO = 0.7
+
+
+@dataclass(frozen=True)
+class PriceVolumeState:
+    """单根分钟线的价量体征，供信号分类与语音播报共享。"""
+
+    ratio: float
+    volume_state: str
+    price_up: bool
+    histogram_growing: bool
+
+    @property
+    def direction(self) -> str:
+        return "上涨" if self.price_up else "下跌"
+
+    @property
+    def momentum(self) -> str:
+        return "MACD 柱变长" if self.histogram_growing else "MACD 柱变短"
+
+
+class MacdTaskbarBar(DesktopSettingsMixin):
     WIDTH = 565
     HEIGHT = 32
     CHART_WIDTH = 88
     ORDER_BOOK_WIDTH = 155
 
-    def __init__(self, code: str | None, poll_seconds: int) -> None:
+    def __init__(self, code: str | None, poll_seconds: int, config_path: Path | None = None) -> None:
+        self._init_settings(config_path, poll_seconds)
         self.code = normalize_stock_code(code or "000001")
         self.poll_seconds = poll_seconds
         self.root = tk.Tk()
+        self.root.title("AStock 行情条")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         if sys.platform == "win32":
             self.root.attributes("-toolwindow", True)
         self.taskbar_color = "#20272d"
+        self.foreground_color = "#f3f4f6"
         self.root.configure(bg=self.taskbar_color)
         self.root.resizable(False, False)
         self.messages: queue.Queue[TaskbarMessage] = queue.Queue()
@@ -881,6 +1048,8 @@ class MacdTaskbarBar:
         self.last_processed: datetime | None = None
         self.latest_point: MacdPoint | None = None
         self.latest_bars: list[MinuteBar] = []
+        self.latest_points: list[MacdPoint] = []
+        self.last_price_volume_signal: str | None = None
         self.latest_change: float | None = None
         self.latest_order_book: OrderBook | None = None
         self.order_book_enabled = False
@@ -892,6 +1061,7 @@ class MacdTaskbarBar:
         self.order_book_seal_label: tk.Label | None = None
         self.order_book_last_label: tk.Label | None = None
         self.context_snapshot: IntradayContext | None = None
+        self.global_context: GlobalMarketContext | None = None
         self.context_code: str | None = None
         self.context_updated = 0.0
         self.equity_event: EquityEvent | None = None
@@ -899,17 +1069,18 @@ class MacdTaskbarBar:
         self.available_boards: list[StockBoard] = []
         self.selected_board: StockBoard | None = None
         self.board_menu_signature: tuple[tuple[str, str, str], ...] = ()
-        self.candidate_mode = "histogram"
-        self.strategy_config = IntradayStrategyConfig()
-        self.trade_journal = TradeJournal(ROOT / "var" / "intraday_trades.json")
+        self.candidate_mode = self.desktop_settings["candidateMode"]
+        self.strategy_config = strategy_config(self.desktop_settings)
+        self.trade_journal = TradeJournal(user_data_dir() / "intraday_trades.json")
         self.backtest_running = False
         self.alert_generation = 0
         self.drag_origin: tuple[int, int] | None = None
         self.last_taskbar_rect: tuple[int, int, int, int] | None = None
         self._build()
         self._dock_inside_taskbar()
-        if not self._is_display_time(datetime.now(CHINA_TZ)):
+        if not self._display_allowed(datetime.now(CHINA_TZ)):
             self.root.withdraw()
+        self._start_settings_watch()
 
     def _build(self) -> None:
         self.root.grid_columnconfigure(2, weight=1)
@@ -1164,6 +1335,8 @@ class MacdTaskbarBar:
         ):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
+            widget.bind("<ButtonRelease-1>", self._end_drag)
+            widget.bind("<Double-Button-1>", self._restore_docking)
         self._update_actual_trade_menu()
         self._update_equity_menu()
 
@@ -1473,6 +1646,7 @@ class MacdTaskbarBar:
 
     def _apply_taskbar_color(self, color: str) -> None:
         self.taskbar_color = color
+        self.foreground_color = foreground_color(color)
         for widget in (
             self.root,
             self.info,
@@ -1492,35 +1666,62 @@ class MacdTaskbarBar:
         ):
             widget.configure(bg=color)
         self.close_button.configure(activebackground="#e45b65")
+        self.code_entry.configure(fg=self.foreground_color, insertbackground=self.foreground_color)
+        self.close_button.configure(fg=self.foreground_color)
+        self.context_menu.configure(bg=color, fg=self.foreground_color)
+
+    def _refresh_chameleon(self) -> None:
+        if not self.desktop_settings["chameleon"]:
+            if self.taskbar_color != "#20272d":
+                self._apply_taskbar_color("#20272d")
+            return
+        if self.drag_origin is not None or not self.root.winfo_viewable():
+            return
+        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        width, height = self.root.winfo_width(), self.root.winfo_height()
+        monitor = self._taskbar_monitor((x, y, x + width, y + height))
+        left, top = max(monitor[0], x - 8), max(monitor[1], y - 8)
+        right, bottom = min(monitor[2], x + width + 8), min(monitor[3], y + height + 8)
+        if right <= left or bottom <= top:
+            return
+        try:
+            image = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
+            color = background_color(image, (x - left, y - top, x + width - left, y + height - top))
+            if color and color != self.taskbar_color:
+                self._apply_taskbar_color(color)
+        except (OSError, ValueError):
+            pass
 
     def _dock_inside_taskbar(self) -> None:
+        if self.drag_origin is not None:
+            return
         self.root.update_idletasks()
         self.root.deiconify()
-        self.root.attributes("-topmost", True)
+        settings = self.desktop_settings
+        self.root.attributes("-topmost", settings["topmost"])
         bounds = self._taskbar_bounds()
         if bounds is not None:
             taskbar, notification = bounds
-            left, top, right, bottom = taskbar
-            horizontal = right - left >= bottom - top
-            if horizontal:
-                notification_left = notification[0] if notification else right
-                x = max(left, notification_left - self.WIDTH - 4)
-                y = top + max((bottom - top - self.HEIGHT) // 2, 0)
-            else:
-                x = left + max((right - left - self.WIDTH) // 2, 0)
-                notification_top = notification[1] if notification else bottom
-                y = max(top, notification_top - self.HEIGHT - 4)
+            monitor = self._taskbar_monitor(taskbar)
+            x, y = calculate_taskbar_position(
+                taskbar, notification, monitor, self.WIDTH, self.HEIGHT, settings["dockMode"]
+            )
             if taskbar != self.last_taskbar_rect:
-                color = self._sample_taskbar_color(taskbar)
-                if color:
-                    self._apply_taskbar_color(color)
                 self.last_taskbar_rect = taskbar
         else:
             x = self.root.winfo_screenwidth() - self.WIDTH - 8
             y = self.root.winfo_screenheight() - self.HEIGHT - 48
-        self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}+{max(x, 0)}+{max(y, 0)}")
+        if settings["dockMode"] == "floating":
+            x, y = settings["windowX"], settings["windowY"]
+            ml, mt, mr, mb = self._taskbar_monitor((x, y, x + self.WIDTH, y + self.HEIGHT))
+            x = min(max(x, ml), max(ml, mr - self.WIDTH))
+            y = min(max(y, mt), max(mt, mb - self.HEIGHT))
+        # Tk interprets negative offsets relative to the right/bottom screen edge.
+        # Use native coordinates below so monitors left of the primary work too.
+        self.root.geometry(f"{self.WIDTH}x{self.HEIGHT}")
+        if sys.platform != "win32":
+            self.root.geometry(f"+{max(x, 0)}+{max(y, 0)}")
         self.root.update_idletasks()
-        self._position_order_book_window()
         if sys.platform == "win32":
             user32 = ctypes.windll.user32
             user32.GetParent.restype = ctypes.c_void_p
@@ -1539,31 +1740,67 @@ class MacdTaskbarBar:
             wrapper = int(user32.GetParent(child) or child)
             user32.SetWindowPos(
                 wrapper,
-                ctypes.c_void_p(-1),  # HWND_TOPMOST
-                0,
-                0,
-                0,
-                0,
-                0x0053,  # no move/resize/activate, but force visible
+                ctypes.c_void_p(-1 if settings["topmost"] else -2),
+                x,
+                y,
+                self.WIDTH,
+                self.HEIGHT,
+                0x0050,  # no activation; apply computed position and size, show window
             )
+        self._position_order_book_window()
+        self._refresh_chameleon()
+
+    def _taskbar_monitor(self, taskbar: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong), ("monitor", WindowRect),
+                        ("work", WindowRect), ("flags", ctypes.c_ulong)]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromRect.argtypes = [ctypes.POINTER(WindowRect), ctypes.c_ulong]
+        user32.MonitorFromRect.restype = ctypes.c_void_p
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MonitorInfo)]
+        user32.GetMonitorInfoW.restype = ctypes.c_bool
+        rectangle = WindowRect(*taskbar)
+        monitor = user32.MonitorFromRect(ctypes.byref(rectangle), 2)
+        info = MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            r = info.monitor
+            return r.left, r.top, r.right, r.bottom
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
     def _maintain_taskbar_position(self) -> None:
-        if not self.root.winfo_exists():
-            return
-        if self._is_display_time(datetime.now(CHINA_TZ)):
-            self._dock_inside_taskbar()
-            if self.order_book_enabled and self.order_book_window is not None:
-                self.order_book_window.deiconify()
-        else:
-            self.root.withdraw()
-            if self.order_book_window is not None:
-                self.order_book_window.withdraw()
-        self.root.after(3000, self._maintain_taskbar_position)
+        """任务栏压顶靠每 3 秒重新置顶维持，任何异常都不能掐断这条链。"""
+        try:
+            if not self.root.winfo_exists():
+                return
+            if self._display_allowed(datetime.now(CHINA_TZ)):
+                self._dock_inside_taskbar()
+                if self.order_book_enabled and self.order_book_window is not None:
+                    self.order_book_window.deiconify()
+            else:
+                self.root.withdraw()
+                if self.order_book_window is not None:
+                    self.order_book_window.withdraw()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 任务栏保活异常，下轮自动重试：{exc}", file=sys.stderr)
+            try:
+                self._set_context_labels("保活重试", "", "#e5b94f", "#e5b94f")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            if self.root.winfo_exists():
+                self.root.after(3000, self._maintain_taskbar_position)
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _is_display_time(now: datetime) -> bool:
         current = now.time()
         return datetime_time(9, 0) <= current < datetime_time(15, 30)
+
+    def _display_allowed(self, now: datetime) -> bool:
+        return display_allowed(self.desktop_settings, now)
 
     def run(self) -> int:
         threading.Thread(target=self._worker, daemon=True).start()
@@ -1585,7 +1822,7 @@ class MacdTaskbarBar:
                 selected_board = self.selected_board
             try:
                 # 实时行情使用短超时，避免某个行情源卡住时拖慢整轮刷新。
-                name, bars = fetch_minute_bars(code, days=1, timeout=3)
+                name, bars = fetch_minute_bars(code, days=1, timeout=self.desktop_settings["quoteTimeout"])
                 closed_bars = completed_bars(bars)
                 points = calculate_macd(closed_bars)
                 if not points:
@@ -1616,7 +1853,7 @@ class MacdTaskbarBar:
                 if (
                     signal_side is None
                     and pending_actual is None
-                    and "09:45" <= today_points[-1].time.strftime("%H:%M") <= "14:45"
+                    and self.strategy_config.sell_start <= today_points[-1].time.strftime("%H:%M") <= self.strategy_config.sell_cutoff
                     and raw_candidates[-1] in ("SELL", "BUY")
                 ):
                     signal_side = raw_candidates[-1]
@@ -1625,39 +1862,69 @@ class MacdTaskbarBar:
                     self.context_snapshot if self.context_code == code else None
                 )
                 boards = list(self.available_boards) if self.context_code == code else []
-                if context is None or time.monotonic() - self.context_updated >= 60:
+                if context is None or time.monotonic() - self.context_updated >= self.desktop_settings["contextRefresh"]:
                     try:
-                        boards = fetch_stock_boards(code, timeout=5)
+                        boards = fetch_stock_boards(code, timeout=self.desktop_settings["contextTimeout"])
+                        with self.state_lock:
+                            latest_selected_board = self.selected_board
                         matching_board = next(
                             (
                                 board
                                 for board in boards
-                                if selected_board is not None
-                                and board.code == selected_board.code
+                                if latest_selected_board is not None
+                                and board.code == latest_selected_board.code
                             ),
                             None,
                         )
-                        selected_board = matching_board or default_stock_board(boards)
+                        selected_board = matching_board or next((board for board in boards if board.code == self.desktop_settings["sectorCode"]), None) or default_stock_board(boards)
                         context = fetch_intraday_context(
                             code,
-                            timeout=5,
+                            timeout=self.desktop_settings["contextTimeout"],
                             sector=selected_board,
                             boards=boards,
                         )
                         with self.state_lock:
-                            self.context_snapshot = context
-                            self.context_code = code
+                            # A board change can happen while the network request is
+                            # in flight. Never let that older request overwrite it.
+                            current_selected_board = next(
+                                (
+                                    board
+                                    for board in boards
+                                    if self.selected_board is not None
+                                    and board.code == self.selected_board.code
+                                ),
+                                None,
+                            )
+                            if (
+                                current_selected_board is not None
+                                and current_selected_board.code != selected_board.code
+                            ):
+                                selected_board = current_selected_board
+                                context = None
+                                self.context_snapshot = None
+                                self.context_code = None
+                            else:
+                                self.context_snapshot = context
+                                self.context_code = code
                             self.available_boards = boards
                             self.selected_board = selected_board
                     except (OSError, RuntimeError, ValueError):
                         pass
-                    self.context_updated = time.monotonic()
+                    self.context_updated = (
+                        time.monotonic() if context is not None else 0.0
+                    )
+                    try:
+                        self.global_context = fetch_global_market_context(
+                            timeout=self.desktop_settings["contextTimeout"]
+                        )
+                    except (OSError, RuntimeError, ValueError):
+                        self.global_context = None
                 if (
                     self.context_code != code
-                    or time.monotonic() - self.equity_updated >= 3600
+                    or time.monotonic() - self.equity_updated >= self.desktop_settings["equityRefresh"]
                 ):
                     try:
-                        equity_event = fetch_equity_event(code, timeout=5)
+                        equity_event = fetch_equity_event(code, timeout=self.desktop_settings["contextTimeout"])
                         with self.state_lock:
                             self.equity_event = equity_event
                     except (OSError, RuntimeError, ValueError):
@@ -1666,12 +1933,12 @@ class MacdTaskbarBar:
                     self.equity_updated = time.monotonic()
                 stock_change = None
                 try:
-                    stock_change = fetch_tencent_stock_change(code, timeout=5)
+                    stock_change = fetch_tencent_stock_change(code, timeout=self.desktop_settings["contextTimeout"])
                 except (OSError, RuntimeError, ValueError):
                     pass
                 order_book = None
                 try:
-                    order_book = fetch_order_book(code, timeout=3)
+                    order_book = fetch_order_book(code, timeout=self.desktop_settings["quoteTimeout"])
                 except (OSError, RuntimeError, ValueError):
                     pass
                 side = signal_side
@@ -1701,6 +1968,7 @@ class MacdTaskbarBar:
                         stock_change,
                         order_book,
                         guarded_signal,
+                        self.global_context,
                     )
                 )
             except (OSError, RuntimeError, ValueError) as exc:
@@ -1708,7 +1976,7 @@ class MacdTaskbarBar:
             self.refresh_event.wait(self.poll_seconds)
             self.refresh_event.clear()
 
-    def _consume_messages(self) -> None:
+    def _consume_messages_once(self) -> None:
         try:
             while True:
                 message = self.messages.get_nowait()
@@ -1754,12 +2022,18 @@ class MacdTaskbarBar:
                     stock_change,
                     order_book,
                     guarded_signal,
+                    global_context,
                 ) = message
                 if code != self.code:
                     continue
                 latest = points[-1]
                 self.latest_point = latest
                 self.latest_bars = bars
+                self.latest_points = points
+                try:
+                    price_volume_signal = self._price_volume_signal()
+                except (IndexError, ZeroDivisionError):
+                    price_volume_signal = None
                 self.latest_change = stock_change
                 if order_book is not None:
                     self.latest_order_book = order_book
@@ -1780,22 +2054,63 @@ class MacdTaskbarBar:
                     else f"{latest.close:.2f}"
                 )
                 self.price_label.config(text=quote_text, fg=quote_color)
-                self.code_entry.config(fg="#f3f4f6")
-                self.context_snapshot = context
+                self.code_entry.config(fg=self.foreground_color)
+                # Ignore a response queued before the user changed the board.
+                # Otherwise the menu can briefly (or permanently) jump back to
+                # the old selection while the worker is still refreshing.
+                with self.state_lock:
+                    current_selected_board = next(
+                        (
+                            board
+                            for board in boards
+                            if self.selected_board is not None
+                            and board.code == self.selected_board.code
+                        ),
+                        None,
+                    )
+                    stale_board_response = (
+                        current_selected_board is not None
+                        and selected_board is not None
+                        and current_selected_board.code != selected_board.code
+                    )
+                    if stale_board_response:
+                        selected_board = current_selected_board
+                        self.context_snapshot = None
+                        self.context_code = None
+                        self.context_updated = 0.0
+                    else:
+                        self.context_snapshot = context
                 if context is None:
                     self._set_context_labels("盘--", "板--", "#929aa8", "#929aa8")
                     menu_text = "环境：暂时无法获取"
                 else:
+                    self.global_context = global_context
+                    combined_score = context.market_change * 0.45 + context.sector_change * 0.20
+                    if global_context is not None:
+                        combined_score += global_context.risk_score * 0.35
+                    regime = "强" if combined_score >= 0.004 else ("弱" if combined_score <= -0.004 else "震")
+                    macro = (
+                        f"银{global_context.bank:+.1%} 油{global_context.brent:+.1%}"
+                        if global_context is not None
+                        else "银-- 油--"
+                    )
                     self._set_context_labels(
-                        f"盘{context.market_change:+.1%}",
-                        f"板{context.sector_change:+.1%}",
+                        f"盘{context.market_change:+.1%} {regime}",
+                        macro,
                         self._change_color(context.market_change),
-                        self._change_color(context.sector_change),
+                        self._change_color(global_context.bank if global_context else 0),
                     )
                     menu_text = (
                         f"{context.market_name} {context.market_change:+.2%} / "
                         f"{context.sector_name} {context.sector_change:+.2%}"
                     )
+                    if global_context:
+                        menu_text += (
+                            f" / 美股 {global_context.label}"
+                            f" 标普{global_context.sp500:+.2%} 纳指{global_context.nasdaq:+.2%}"
+                            f" SOXX{global_context.semis:+.2%} VIX{global_context.vix:+.2%}"
+                            f" Brent{global_context.brent:+.2%} 银行{global_context.bank:+.2%}"
+                        )
                 self.context_menu.entryconfigure(
                     self.context_menu_index, label=menu_text
                 )
@@ -1810,14 +2125,40 @@ class MacdTaskbarBar:
                 if (
                     is_new_bar
                     and signal is not None
+                    and self._alerts_allowed(datetime.now(CHINA_TZ))
                     and signal.time.date() == datetime.now(CHINA_TZ).date()
                 ):
                     self._show_signal(signal, guarded=guarded_signal)
+                if (
+                    price_volume_signal is not None
+                    and self.desktop_settings["notifications"]
+                    and self.desktop_settings["volumeSpeech"]
+                    and self._alerts_allowed(datetime.now(CHINA_TZ))
+                    and price_volume_signal[0] != "normal"
+                    and price_volume_signal[0] != self.last_price_volume_signal
+                    and self._allow_audio(price_volume_signal[0])
+                ):
+                    threading.Thread(
+                        target=_speak_text,
+                        args=(f"价量提示，{price_volume_signal[1]}",),
+                        daemon=True,
+                    ).start()
+                    self.last_price_volume_signal = price_volume_signal[0]
                 self.last_processed = latest.time
         except queue.Empty:
             pass
-        if self.root.winfo_exists():
-            self.root.after(150, self._consume_messages)
+
+    def _consume_messages(self) -> None:
+        """薄包装：渲染异常只跳过本轮，绝不打断 150ms 重调度。"""
+        try:
+            self._consume_messages_once()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 行情条渲染异常，已跳过本轮：{exc}", file=sys.stderr)
+        try:
+            if self.root.winfo_exists():
+                self.root.after(150, self._consume_messages)
+        except tk.TclError:
+            pass
 
     def _change_code(self, _event: object | None = None) -> None:
         try:
@@ -1831,6 +2172,7 @@ class MacdTaskbarBar:
         with self.state_lock:
             self.code = code
             self.last_processed = None
+            self.last_price_volume_signal = None
             self.alert_generation += 1
             self.context_snapshot = None
             self.context_code = None
@@ -2185,7 +2527,7 @@ class MacdTaskbarBar:
             fill="#aeb6c2",
             font=("Microsoft YaHei UI", 7, "bold"),
         )
-        if not volumes:
+        if not volumes or not recent_points:
             return
         step = (width - 6) / len(volumes)
         for index, volume in enumerate(volumes):
@@ -2259,6 +2601,8 @@ class MacdTaskbarBar:
         return coordinates
 
     def _show_signal(self, signal: MacdSignal, guarded: bool = True) -> None:
+        if not self.desktop_settings["notifications"]:
+            return
         buy = signal.side == "BUY"
         color = "#e45b65" if buy else "#36c98f"
         self.alert_generation += 1
@@ -2280,23 +2624,30 @@ class MacdTaskbarBar:
             price=signal.price,
             sell_price=pending.price if pending is not None else None,
             guarded=guarded,
+            config=self.strategy_config,
         )
         change = getattr(self, "latest_change", None)
         change_text = f"涨跌 {change:+.2%}" if change is not None else "涨跌 --"
-        right_text = f"{reason}·{change_text}·{strength} {signal.time:%H:%M}"
+        price_volume_context = self._price_volume_context()
+        right_text = (
+            f"{reason}·{change_text}·{strength}·{price_volume_context} "
+            f"{signal.time:%H:%M}"
+        )
         self._set_context_labels(left_text, right_text, color, color)
         # 仅在任务栏小条内加强提醒，不创建独立弹窗。
-        self._pulse_signal(generation, color, flashes=14)
-        self._flash_taskbar()
-        threading.Thread(
-            target=self._play_alert_sound, args=(signal.side,), daemon=True
-        ).start()
-        threading.Thread(
-            target=self._speak_alert,
-            args=(signal.side, signal.price, change, guarded),
-            daemon=True,
-        ).start()
-        self.root.after(30_000, lambda: self._clear_signal(generation))
+        if self.desktop_settings["flash"]:
+            self._pulse_signal(generation, color, flashes=14)
+            self._flash_taskbar()
+        audio_allowed = self._allow_audio(signal.side, guarded)
+        if audio_allowed and self.desktop_settings["sound"]:
+            threading.Thread(target=self._play_alert_sound, args=(signal.side,), daemon=True).start()
+        if audio_allowed and self.desktop_settings["speech"]:
+            threading.Thread(
+                target=self._speak_alert,
+                args=(signal.side, signal.price, change, guarded, price_volume_context),
+                daemon=True,
+            ).start()
+        self.root.after(self.desktop_settings["alertSeconds"] * 1000, lambda: self._clear_signal(generation))
 
     def _flash_taskbar(self) -> None:
         """让 Windows 任务栏按钮短暂闪烁，不创建额外窗口。"""
@@ -2317,16 +2668,18 @@ class MacdTaskbarBar:
         price: float | None = None,
         sell_price: float | None = None,
         guarded: bool = True,
+        config: IntradayStrategyConfig | None = None,
     ) -> str:
+        config = config or IntradayStrategyConfig()
         if mode == "histogram":
             if side == "SELL" and not guarded:
                 return "红柱连续3次变短·未达VWAP高位"
             if side == "BUY" and not guarded:
                 return "绿柱连续3次变短·未记录卖出"
             if side == "BUY" and price is not None and sell_price is not None:
-                if price >= sell_price * (1 + 0.006):
+                if price >= sell_price * (1 + config.chase_back_rise):
                     return "卖飞保护买回"
-                if price <= sell_price * (1 - 0.008):
+                if price <= sell_price * (1 - config.buyback_discount):
                     return "价差达标+绿柱缩短"
             return "绿柱连续3次变短" if side == "BUY" else "红柱连续3次变短"
         return "金叉" if side == "BUY" else "死叉"
@@ -2356,11 +2709,13 @@ class MacdTaskbarBar:
 
     @staticmethod
     def _speak_alert(
-        side: str, price: float, change: float | None, guarded: bool
+        side: str,
+        price: float,
+        change: float | None,
+        guarded: bool,
+        price_volume_context: str = "",
     ) -> None:
-        """使用 Windows 内置语音后台播报，不弹出命令行窗口。"""
-        if sys.platform != "win32":
-            return
+        """组装买卖信号语音文本并后台播报。"""
         action = (
             "买回提醒"
             if side == "BUY" and guarded
@@ -2371,25 +2726,11 @@ class MacdTaskbarBar:
             else "卖出观察"
         )
         change_text = "涨跌幅未知" if change is None else f"涨跌 {change:+.2%}"
-        speech = f"{action}，价格 {price:.2f}，{change_text}"
-        escaped = speech.replace("'", "''")
-        command = (
-            "Add-Type -AssemblyName System.Speech; "
-            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-            f"$s.Speak('{escaped}'); $s.Dispose()"
+        context_text = (
+            f"，{price_volume_context}" if price_volume_context else ""
         )
-        try:
-            shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-            if shell is None:
-                return
-            subprocess.Popen(
-                [shell, "-NoProfile", "-WindowStyle", "Hidden", "-Command", command],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except OSError:
-            pass
+        speech = f"{action}，价格 {price:.2f}，{change_text}{context_text}"
+        _speak_text(speech)
 
     def _test_signal(self, side: str) -> None:
         point = self.latest_point
@@ -2421,8 +2762,8 @@ class MacdTaskbarBar:
 
     def _backtest_worker(self, code: str, mode: str) -> None:
         try:
-            bars = completed_bars(fetch_sina_history_bars(code))
-            result = run_backtest(bars, mode)
+            bars = completed_bars(fetch_sina_history_bars(code, limit=self.desktop_settings["historyBars"], timeout=self.desktop_settings["contextTimeout"]))
+            result = run_backtest(bars, mode, config=self.strategy_config)
             self.messages.put(("backtest", code, mode, result))
         except (OSError, RuntimeError, ValueError) as exc:
             self.messages.put(("backtest_error", code, str(exc)))
@@ -2688,7 +3029,7 @@ class MacdTaskbarBar:
         window.attributes("-topmost", True)
         if sys.platform == "win32":
             window.attributes("-toolwindow", True)
-        width, height = 430, 255
+        width, height = 430, 325
         x = max(self.root.winfo_x(), 0)
         y = max(self.root.winfo_y() - height - 6, 0)
         window.geometry(f"{width}x{height}+{x}+{y}")
@@ -2727,6 +3068,18 @@ class MacdTaskbarBar:
             font=("Microsoft YaHei UI", 9, "bold"),
         )
         self.insight_sentiment_label.pack(fill="x", padx=10, pady=(2, 5))
+
+        self.insight_price_volume_label = tk.Label(
+            window,
+            text=self._price_volume_insight_text(),
+            justify="left",
+            anchor="w",
+            wraplength=405,
+            bg="#20272d",
+            fg="#d8dde5",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        self.insight_price_volume_label.pack(fill="x", padx=10, pady=(0, 6))
 
         self.insight_equity_label = tk.Label(
             window,
@@ -2775,6 +3128,9 @@ class MacdTaskbarBar:
         if window is None or label is None or not window.winfo_exists():
             return
         label.config(text=self._insight_sentiment_text())
+        insight_label = getattr(self, "insight_price_volume_label", None)
+        if insight_label is not None:
+            insight_label.config(text=self._price_volume_insight_text())
         equity_label = getattr(self, "insight_equity_label", None)
         if equity_label is not None:
             equity_label.config(text=self._equity_summary())
@@ -2794,8 +3150,74 @@ class MacdTaskbarBar:
         macd = "MACD 多头" if point is not None and point.histogram > 0 else "MACD 空头"
         return (
             f"最新情绪：{mood} · 盘 {context.market_change:+.2%} · "
-            f"板 {context.sector_change:+.2%} · {macd}"
+            f"板 {context.sector_change:+.2%} · {macd}\n"
+            f"板块强弱 {context.sector_relative_strength:+.2%} · "
+            f"量比 {context.sector_volume_ratio:.2f} · "
+            f"动量评分 {context.sector_sentiment_score}/100"
         )
+
+    def _price_volume_insight_text(self) -> str:
+        signal = self._price_volume_signal()
+        if signal is None:
+            return "价量提示：等待足够的分钟行情"
+        return "价量提示：" + signal[1]
+
+    def _compute_price_volume_state(self) -> PriceVolumeState | None:
+        bars = self.latest_bars
+        points = self.latest_points
+        if len(bars) < 2 or len(points) < 2:
+            return None
+        latest_volume = max(bars[-1].volume, 0)
+        baseline = [max(bar.volume, 0) for bar in bars[-6:-1]]
+        average_volume = sum(baseline) / len(baseline) if baseline else 0
+        ratio = latest_volume / average_volume if average_volume else 0
+        return PriceVolumeState(
+            ratio=ratio,
+            volume_state=(
+                "放量"
+                if ratio >= self.desktop_settings["volumeSurge"]
+                else "缩量"
+                if ratio <= self.desktop_settings["volumeShrink"]
+                else "平量"
+            ),
+            price_up=bars[-1].close >= bars[-2].close,
+            histogram_growing=abs(points[-1].histogram)
+            > abs(points[-2].histogram),
+        )
+
+    def _price_volume_context(self) -> str:
+        state = self._compute_price_volume_state()
+        if state is None:
+            return "价量数据不足"
+        return f"{state.direction}{state.volume_state}，{state.momentum}"
+
+    def _price_volume_signal(self) -> tuple[str, str] | None:
+        bars = self.latest_bars
+        state = self._compute_price_volume_state()
+        if state is None:
+            return None
+        if (
+            state.price_up
+            and state.ratio >= self.desktop_settings["volumeSurge"]
+            and state.histogram_growing
+        ):
+            return "confirm", "上涨放量，MACD 柱变长，走势确认度较好"
+        if (
+            state.price_up
+            and state.ratio <= self.desktop_settings["volumeShrink"]
+            and not state.histogram_growing
+        ):
+            return "weak", "上涨缩量，MACD 柱变短，上涨可能乏力"
+        if not state.price_up and state.ratio >= self.desktop_settings["volumeSurge"]:
+            return "sell_pressure", "下跌放量，抛压需要警惕"
+        prior_closes = [bar.close for bar in bars[-11:-1]]
+        if (
+            prior_closes
+            and bars[-1].close >= max(prior_closes)
+            and state.ratio < self.desktop_settings["volumeSurge"]
+        ):
+            return "divergence", "价格创新高，但成交量没有同步放大，注意量价背离"
+        return "normal", f"当前{state.direction}，{state.volume_state}，{state.momentum}"
 
     def _show_context_menu(self, event: tk.Event) -> None:
         try:
@@ -2807,25 +3229,62 @@ class MacdTaskbarBar:
         if generation != self.alert_generation:
             return
         self.signal_strip.config(bg="#555b66", width=3)
-        self.price_label.config(fg="#f3f4f6")
+        self.price_label.config(fg=self.foreground_color)
 
     def _show_fully(self, _event: tk.Event) -> None:
         self.root.lift()
 
     def _start_drag(self, event: tk.Event) -> None:
+        if not self.desktop_settings["dragEnabled"] or event.widget in (self.code_entry, self.close_button):
+            return
         self.drag_origin = (
-            event.x_root - self.root.winfo_x(),
-            event.y_root - self.root.winfo_y(),
+            event.x_root - self.root.winfo_rootx(),
+            event.y_root - self.root.winfo_rooty(),
         )
+        self._drag_moved = False
 
     def _drag(self, event: tk.Event) -> None:
         if self.drag_origin is None:
             return
         offset_x, offset_y = self.drag_origin
-        self.root.geometry(f"+{event.x_root - offset_x}+{event.y_root - offset_y}")
+        x, y = event.x_root - offset_x, event.y_root - offset_y
+        if not self._drag_moved and abs(x - self.root.winfo_rootx()) + abs(y - self.root.winfo_rooty()) < 4:
+            return
+        self._drag_moved = True
+        user32 = ctypes.windll.user32
+        user32.GetParent.restype = ctypes.c_void_p
+        user32.GetParent.argtypes = [ctypes.c_void_p]
+        hwnd = int(user32.GetParent(self.root.winfo_id()) or self.root.winfo_id())
+        user32.SetWindowPos(hwnd, None, x, y, 0, 0, 0x0015)  # move, no resize/z-order/activation
+
+    def _save_position(self, changes: dict) -> None:
+        if self.config_path:
+            # Merge current disk settings so a drag cannot undo a uTools edit.
+            settings = {**read_settings(self.config_path), **changes}
+            temporary = self.config_path.with_suffix('.position.tmp')
+            temporary.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self.config_path)
+            self._reload_settings()
+        else:
+            self.desktop_settings.update(changes)
+            self._dock_inside_taskbar()
+
+    def _end_drag(self, _event: tk.Event) -> None:
+        if self.drag_origin is None:
+            return
+        self.drag_origin = None
+        if self._drag_moved:
+            self.root.update_idletasks()
+            self._save_position({"dockMode": "floating", "windowX": self.root.winfo_rootx(), "windowY": self.root.winfo_rooty()})
+
+    def _restore_docking(self, _event: tk.Event) -> None:
+        if not self.desktop_settings["dragEnabled"] or _event.widget in (self.code_entry, self.close_button):
+            return
+        self.drag_origin = None
+        self._save_position({"dockMode": "taskbar"})
 
 
-def run_taskbar_bar(code: str | None, poll_seconds: int) -> int:
+def run_taskbar_bar(code: str | None, poll_seconds: int, config_path: Path | None = None) -> int:
     global _TASKBAR_MUTEX
     if sys.platform == "win32":
         kernel32 = ctypes.windll.kernel32
@@ -2836,10 +3295,13 @@ def run_taskbar_bar(code: str | None, poll_seconds: int) -> int:
             kernel32.CreateMutexW(None, True, "Global\\AStockMacdTaskbarBar") or 0
         )
         if kernel32.GetLastError() == 183:
+            if config_path is not None:
+                print("行情条已在运行，等待原窗口读取新的 uTools 配置。", flush=True)
+                return 3
             show_popup("AStock 行情条已在运行", "请在现有任务栏行情条中更换股票或板块。")
             return 0
     try:
-        return MacdTaskbarBar(code, poll_seconds).run()
+        return MacdTaskbarBar(code, poll_seconds, config_path).run()
     except ValueError as exc:
         show_popup("AStock MACD 启动失败", str(exc), warning=True)
         return 2
@@ -2851,9 +3313,9 @@ def main() -> int:
         print("参数错误：--poll 不能小于 3 秒", file=sys.stderr)
         return 2
     if args.tray or args.bar:
-        return run_taskbar_bar(args.code, args.poll)
+        return run_taskbar_bar(args.code, args.poll, args.settings)
     if args.gui:
-        return run_gui(args.code, args.poll, show_notifications=not args.no_popup)
+        return run_gui(args.code, args.poll, show_notifications=not args.no_popup, config_path=args.settings)
     raw_code = args.code or input("请输入要盯盘的 6 位股票代码（如 600519）：")
     try:
         code = normalize_stock_code(raw_code)
